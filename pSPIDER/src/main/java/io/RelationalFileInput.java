@@ -33,9 +33,9 @@ public class RelationalFileInput {
         this.relationName = relationName;
         this.tableOffset = tableOffset;
 
-        this.hasHeader = config.inputFileHasHeader;
-        this.skipDifferingLines = config.inputFileSkipDifferingLines;
-        this.nullValue = config.inputFileNullString;
+        this.hasHeader = config.header;
+        this.skipDifferingLines = config.skipDifferingLines;
+        this.nullValue = config.nullString;
 
         this.nullHandling = config.nullHandling;
 

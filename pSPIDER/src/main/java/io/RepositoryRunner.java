@@ -1,5 +1,6 @@
 package io;
 
+import runner.Config;
 import structures.Attribute;
 
 import java.io.BufferedWriter;
@@ -7,35 +8,32 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.Queue;
 
-public class RepositoryRunner extends Thread {
+public class RepositoryRunner {
 
-    Queue<RelationalFileInput> tableQueue;
+    RelationalFileInput table;
     Attribute[] attributeIndex;
+    Config config;
 
-    public RepositoryRunner(Queue<RelationalFileInput> tableQueue, Attribute[] attributeIndex) {
-        this.tableQueue = tableQueue;
+    public RepositoryRunner(RelationalFileInput table, Attribute[] attributeIndex, Config config) {
+        this.table = table;
         this.attributeIndex = attributeIndex;
+        this.config = config;
     }
 
     public void run() {
-        while (!tableQueue.isEmpty()) {
-            RelationalFileInput table = tableQueue.poll();
-            if (table == null) continue;
+        int tableOffset = table.tableOffset;
+        Path[] paths = generatePaths(tableOffset, table.numberOfColumns);
+        try {
+            BufferedWriter[] writers = attachWriters(paths);
 
-            int tableOffset = table.tableOffset;
-            Path[] paths = generatePaths(tableOffset, table.numberOfColumns);
-            try {
-                BufferedWriter[] writers = attachWriters(paths);
+            createAttributes(table, attributeIndex, paths);
 
-                createAttributes(table, attributeIndex, paths);
-
-                store(table, writers, attributeIndex, tableOffset);
-            } catch (IOException e) {
-                e.printStackTrace();
-            }
+            store(table, writers, attributeIndex, tableOffset);
+        } catch (IOException e) {
+            e.printStackTrace();
         }
+
     }
 
     private void createAttributes(RelationalFileInput table, Attribute[] attributeIndex, Path[] paths) {
@@ -60,12 +58,12 @@ public class RepositoryRunner extends Thread {
                     writers[index].write(escape(value));
                     writers[index].newLine();
                 } else {
-                    attributeIndex[tableOffset+index].incNullCount();
+                    attributeIndex[tableOffset + index].incNullCount();
                 }
             }
         }
         for (int i = 0; i < writers.length; i++) {
-            attributeIndex[tableOffset+i].setSize(tableSize);
+            attributeIndex[tableOffset + i].setSize(tableSize);
             writers[i].flush();
             writers[i].close();
         }
@@ -87,8 +85,8 @@ public class RepositoryRunner extends Thread {
     private Path[] generatePaths(int tableOffset, int numColumns) {
         Path[] paths = new Path[numColumns];
         for (int i = 0; i < numColumns; i++) {
-            File tempFile = new File(".\\temp\\attribute_" + (tableOffset + i) + ".txt");
-            paths[i] = tempFile.toPath();
+            File tempFile = new File(config.tempFolder + File.separator  + "a_" + (tableOffset + i) + ".txt");
+                    paths[i] = tempFile.toPath();
         }
         return paths;
     }
