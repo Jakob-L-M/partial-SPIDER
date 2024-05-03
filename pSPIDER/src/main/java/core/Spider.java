@@ -22,6 +22,7 @@ public class Spider {
 
     private final Config config;
     private final Logger logger;
+    private final long startTime;
     private Attribute[] attributeIndex;
     private PriorityQueue<Attribute> priorityQueue;
 
@@ -29,10 +30,11 @@ public class Spider {
     public Spider(Config config) {
         this.config = config;
         this.logger = LoggerFactory.getLogger(Spider.class);
+        this.startTime = System.currentTimeMillis();
     }
 
 
-    public void execute() throws IOException, InterruptedException {
+    public void execute() throws IOException {
         logger.info("Starting Execution");
         List<RelationalFileInput> tables = this.config.getFileInputs();
 
@@ -80,19 +82,14 @@ public class Spider {
      *
      * @param tables Input Files
      */
-    private void createAttributes(List<RelationalFileInput> tables) throws InterruptedException {
+    private void createAttributes(List<RelationalFileInput> tables) {
         logger.info("Creating attribute files");
         long sTime = System.currentTimeMillis();
 
-        Queue<RelationalFileInput> inputQueue = new ArrayDeque<>(tables);
-        RepositoryRunner[] repositoryRunners = new RepositoryRunner[config.numThreads];
-        for (int i = 0; i < config.numThreads; i++) {
-            repositoryRunners[i] = new RepositoryRunner(inputQueue, attributeIndex);
-            repositoryRunners[i].start();
-        }
-        for (int i = 0; i < config.numThreads; i++) {
-            repositoryRunners[i].join();
-        }
+        tables.parallelStream().forEach(table -> {
+            RepositoryRunner repositoryRunner = new RepositoryRunner(table, attributeIndex, config);
+            repositoryRunner.run();
+        });
 
         logger.info("Finished creating attribute Files. Took: " + (System.currentTimeMillis() - sTime) + "ms");
     }
@@ -100,7 +97,6 @@ public class Spider {
     private void enqueueAttributes() throws IOException {
 
         Queue<Attribute> attributeQueue = Arrays.stream(attributeIndex).sorted(Attribute::compareBySize).collect(Collectors.toCollection(ArrayDeque::new));
-        System.gc();
         MemoryUsage memoryUsage = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
         long available = memoryUsage.getMax() - memoryUsage.getUsed();
         // we estimate 400 Bytes per String including overhead
@@ -256,7 +252,6 @@ public class Spider {
         bw.flush();
         bw.close();
 
-        // TODO: log num spills
         bw = new BufferedWriter(new FileWriter(".\\results\\" + config.executionName + "_" + (System.currentTimeMillis()/1000) + ".json"));
         // build a json file
         bw.write('{');
@@ -270,6 +265,7 @@ public class Spider {
         bw.write("\"enqueue\": " + enqueue + ",");
         bw.write("\"pINDCreation\": " + pINDCreation + ",");
         bw.write("\"pINDValidation\": " + pINDValidation + ",");
+        bw.write("\"total_time\": " + (System.currentTimeMillis() - startTime) + ",");
         // the total of spilled files + the copied attribute file
         bw.write("\"spilledFiles\": " + (Arrays.stream(attributeIndex).mapToInt(Attribute::getSpilledFiles).sum() + attributeIndex.length));
         bw.write('}');
