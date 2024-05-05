@@ -8,8 +8,9 @@ import java.io.File;
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
+import java.util.concurrent.Callable;
 
-public class RepositoryRunner {
+public class RepositoryRunner implements Callable<Void> {
 
     RelationalFileInput table;
     Attribute[] attributeIndex;
@@ -21,7 +22,8 @@ public class RepositoryRunner {
         this.config = config;
     }
 
-    public void run() {
+    @Override
+    public Void call() {
         int tableOffset = table.tableOffset;
         Path[] paths = generatePaths(tableOffset, table.numberOfColumns);
         try {
@@ -33,7 +35,7 @@ public class RepositoryRunner {
         } catch (IOException e) {
             e.printStackTrace();
         }
-
+        return null;
     }
 
     private void createAttributes(RelationalFileInput table, Attribute[] attributeIndex, Path[] paths) {

@@ -13,29 +13,34 @@ import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.nio.file.StandardOpenOption;
 import java.util.*;
+import java.util.concurrent.Callable;
 
-public class MultiwayMergeSort {
+public class MultiwayMergeSort implements Callable<Void> {
 
     private final Path origin;
-    private final Map<String, Long> values;
-    private final List<Path> spilledFiles;
+    private final int mapLimit;
+    private Map<String, Long> values;
+    private List<Path> spilledFiles;
     private final Logger logger;
     private final Attribute attribute;
     private final int maxMapSize;
     private int valuesSinceLastSpill;
 
     public MultiwayMergeSort(Config config, Attribute attribute, int stringLimit) {
-        this.values = new HashMap<>((int) (stringLimit*1.05));
         this.attribute = attribute;
-        this.spilledFiles = new ArrayList<>();
+        this.mapLimit = stringLimit;
         this.valuesSinceLastSpill = 0;
         this.origin = attribute.getPath();
         this.logger = LoggerFactory.getLogger(MultiwayMergeSort.class);
         this.maxMapSize = config.maxMemory;
     }
 
-    public void sort() throws IOException {
+    @Override
+    public Void call() throws IOException {
         logger.debug("Starting sort for: " + attribute.getId());
+        this.values = new HashMap<>((int) (mapLimit*1.05));
+        this.spilledFiles = new ArrayList<>();
+
         long sTime = System.currentTimeMillis();
 
         // one file is created when merging
@@ -56,7 +61,11 @@ public class MultiwayMergeSort {
         attribute.spilledFiles += spilledFiles.size();
         this.removeSpillFiles();
 
+        // release memory
+        values = null;
+
         logger.debug("Finished sort for: " + attribute.getId() + ". Took: " + (System.currentTimeMillis() - sTime));
+        return null;
     }
 
     private void writeSpillFiles() throws IOException {
@@ -83,7 +92,7 @@ public class MultiwayMergeSort {
     }
 
     private void writeSpillFile() throws IOException {
-        logger.info("Spilling Attribute " + this.origin + "#" + this.spilledFiles.size());
+        logger.debug("Spilling Attribute " + this.origin + "#" + this.spilledFiles.size());
         Path target = Paths.get(this.origin + "#" + this.spilledFiles.size());
         this.write(target);
         this.spilledFiles.add(target);
@@ -113,6 +122,7 @@ public class MultiwayMergeSort {
             }
         });
 
-        this.spilledFiles.clear();
+        spilledFiles = null;
     }
+
 }

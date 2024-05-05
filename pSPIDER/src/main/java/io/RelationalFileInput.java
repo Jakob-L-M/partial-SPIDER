@@ -9,12 +9,15 @@ import runner.Config;
 import java.io.BufferedReader;
 import java.io.FileReader;
 import java.io.IOException;
+import java.nio.file.Files;
+import java.nio.file.Path;
 
-public class RelationalFileInput {
+public class RelationalFileInput implements Comparable<RelationalFileInput>{
 
     protected static final String DEFAULT_HEADER_STRING = "column";
     public String[] headerLine;
     public int tableOffset;
+    public long size;
     protected CSVReader CSVReader;
     protected String[] nextLine;
     protected String relationName;
@@ -38,6 +41,8 @@ public class RelationalFileInput {
         this.nullValue = config.nullString;
 
         this.nullHandling = config.nullHandling;
+
+        this.size = Files.size(Path.of(relationPath));
 
         BufferedReader reader = new BufferedReader(new FileReader(relationPath));
 
@@ -139,4 +144,9 @@ public class RelationalFileInput {
         return numberOfColumns;
     }
 
+    @Override
+    public int compareTo(RelationalFileInput o) {
+        // reverse comparison for descending sort
+        return this.size > o.size ? -1 : 1;
+    }
 }

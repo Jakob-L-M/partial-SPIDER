@@ -1,24 +1,19 @@
 package structures;
 
 import io.ReadPointer;
-import it.unimi.dsi.fastutil.ints.IntLinkedOpenHashSet;
-import it.unimi.dsi.fastutil.ints.IntSet;
-import lombok.Data;
+import lombok.Getter;
 import runner.Config;
 
 import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.HashMap;
-import java.util.Iterator;
-import java.util.Map;
-import java.util.Set;
+import java.util.*;
 
 /**
  * An Attribute resembles a column. It manages its own dependent and referenced attributes.
  */
-@Data
-public class Attribute {
+@Getter
+public class Attribute implements Comparable<Attribute> {
 
 
     private final int id;
@@ -26,8 +21,8 @@ public class Attribute {
     private final String columnName;
     public int spilledFiles;
 
-    private Map<Integer, Long> referenced;
-    private IntSet dependent;
+    private final PINDList referenced;
+    private int dependent;
 
     private long size;
     private long uniqueSize;
@@ -35,7 +30,7 @@ public class Attribute {
     private long violationsLeft;
 
     private ReadPointer readPointer;
-    private Path path;
+    private final Path path;
 
     private String currentValue;
     private Long currentOccurrences;
@@ -45,8 +40,7 @@ public class Attribute {
         this.path = attributePath;
         this.tableName = tableName;
         this.columnName = columnName;
-        this.dependent = new IntLinkedOpenHashSet(); //TODO: get rid of this
-        this.referenced = new HashMap<>();
+        this.referenced = new PINDList();
     }
 
     public void calculateViolations(Config config) {
@@ -54,6 +48,11 @@ public class Attribute {
             this.violationsLeft = (long) ((1.0 - config.threshold) * size);
         } else {
             this.violationsLeft = (long) ((1.0 - config.threshold) * uniqueSize);
+        }
+
+        if (config.nullHandling == Config.NullHandling.INEQUALITY) {
+            // all nulls are different from each other. Therefore, we need to violate the attribute by the number of nulls
+            this.violationsLeft -= this.getNullCount();
         }
     }
 
@@ -72,21 +71,19 @@ public class Attribute {
     }
 
     /**
-     * Adds all dependent ids from the given Set to the internal dependent set.
+     * Sets the number of dependent ids. Will be used to figure out if the attribute is still a referenced side for other attributes
      *
-     * @param dependent ids of attributes that should be added
+     * @param dependent number of ids that depend on this attribute
      */
-    public void addDependent(final IntSet dependent) {
-        this.dependent.addAll(dependent);
+    public void setDependent(int dependent) {
+        this.dependent = dependent;
     }
 
     /**
-     * Removes all dependent ids from the given Set from the internal dependent set.
-     *
-     * @param dependent ids of attributes that should be removed
+     * If another attribute does no longer refer this attribute, this method should be called at the instant that this happened
      */
-    public void removeDependent(final int dependent) {
-        this.dependent.remove(dependent);
+    public void removeDependent() {
+        this.dependent--;
     }
 
     /**
@@ -94,17 +91,8 @@ public class Attribute {
      *
      * @param referenced ids of attributes that should be added
      */
-    public void addReferenced(final IntSet referenced) {
-        referenced.forEach(x -> this.referenced.put(x, violationsLeft));
-    }
-
-    /**
-     * Removes all referenced ids from the given Set from the internal referenced set.
-     *
-     * @param referenced ids of attributes that should be removed
-     */
-    public void removeReferenced(final int referenced) {
-        this.referenced.remove(referenced);
+    public void addReferenced(List<Integer> referenced) {
+        referenced.stream().filter(x -> x != this.getId()).forEach(x -> this.referenced.add(x, violationsLeft));
     }
 
     /**
@@ -130,9 +118,10 @@ public class Attribute {
      * @param attributeIndex The index that stores all attributes
      */
     public void intersectReferenced(Set<Integer> attributes, final Attribute[] attributeIndex, Config config) {
-        Iterator<Integer> referencedIterator = referenced.keySet().iterator();
-        while (referencedIterator.hasNext()) {
-            final int ref = referencedIterator.next();
+        PINDList.PINDIterator iterator =  referenced.elementIterator();
+        while (iterator.hasNext()) {
+            PINDList.PINDElement current = iterator.next();
+            int ref = current.id;
             if (attributes.contains(ref)) {
                 continue;
             }
@@ -140,14 +129,14 @@ public class Attribute {
             long updated_violations;
             // v won't be null since we iterate the key set
             if (config.duplicateHandling == Config.DuplicateHandling.UNAWARE) {
-                updated_violations = referenced.compute(ref, (k, v) -> v - currentOccurrences);
+                updated_violations = current.violate(currentOccurrences);
             } else {
-                updated_violations = referenced.compute(ref, (k, v) -> v - 1);
+                updated_violations = current.violate(1L);
             }
 
             if (updated_violations < 0L) {
-                referencedIterator.remove();
-                attributeIndex[ref].removeDependent(id);
+                iterator.remove();
+                attributeIndex[ref].removeDependent();
             }
         }
     }
@@ -156,8 +145,8 @@ public class Attribute {
      * An Attribute is considered as finished, if it is not referenced by any other and is not dependent on any
      * other attribute. Since it is irrelevant for pIND discovery now, it can be removed from the attribute queue.
      */
-    public boolean isFinished() {
-        return referenced.isEmpty() && dependent.isEmpty();
+    public boolean isNotFinished() {
+        return !referenced.isEmpty() || dependent != 0;
     }
 
     /**
@@ -178,5 +167,30 @@ public class Attribute {
 
     public void incNullCount() {
         this.nullCount++;
+    }
+
+    @Override
+    public int compareTo(Attribute o) {
+        if (this.getCurrentValue() == null && o.getCurrentValue() == null) {
+            return 0;
+        }
+
+        if (this.getCurrentValue() == null) {
+            return 1;
+        }
+
+        if (o.getCurrentValue() == null) {
+            return -1;
+        }
+
+        return this.getCurrentValue().compareTo(o.getCurrentValue());
+    }
+
+    public void setSize(long size) {
+        this.size = size;
+    }
+
+    public void setUniqueSize(long uniqueSize) {
+        this.uniqueSize = uniqueSize;
     }
 }

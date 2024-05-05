@@ -2,13 +2,12 @@ package core;
 
 import io.RelationalFileInput;
 import io.RepositoryRunner;
-import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
-import it.unimi.dsi.fastutil.ints.IntSet;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import runner.Config;
 import structures.Attribute;
 import structures.MultiwayMergeSort;
+import structures.PINDList;
 
 import java.io.BufferedWriter;
 import java.io.FileWriter;
@@ -16,7 +15,9 @@ import java.io.IOException;
 import java.lang.management.ManagementFactory;
 import java.lang.management.MemoryUsage;
 import java.util.*;
-import java.util.stream.Collectors;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 public class Spider {
 
@@ -34,7 +35,7 @@ public class Spider {
     }
 
 
-    public void execute() throws IOException {
+    public void execute() throws IOException, InterruptedException {
         logger.info("Starting Execution");
         List<RelationalFileInput> tables = this.config.getFileInputs();
 
@@ -72,7 +73,7 @@ public class Spider {
         int numAttributes = getTotalColumnCount(tables);
         logger.info("Found " + numAttributes + " attributes");
         attributeIndex = new Attribute[numAttributes];
-        priorityQueue = new PriorityQueue<>(numAttributes, this::compareAttributes);
+        priorityQueue = new PriorityQueue<>(numAttributes);
 
         logger.info("Finished Initializing Attributes. Took: " + (System.currentTimeMillis() - sTime) + "ms");
     }
@@ -82,109 +83,115 @@ public class Spider {
      *
      * @param tables Input Files
      */
-    private void createAttributes(List<RelationalFileInput> tables) {
+    private void createAttributes(List<RelationalFileInput> tables) throws InterruptedException {
         logger.info("Creating attribute files");
         long sTime = System.currentTimeMillis();
 
-        tables.parallelStream().forEach(table -> {
-            RepositoryRunner repositoryRunner = new RepositoryRunner(table, attributeIndex, config);
-            repositoryRunner.run();
+        ExecutorService executors = Executors.newFixedThreadPool(config.parallel);
+        executors.invokeAll(tables.stream().sorted().map(table -> new RepositoryRunner(table, attributeIndex, config)).toList()).forEach(repositoryFuture -> {
+            try {
+                repositoryFuture.get();
+            } catch (InterruptedException | ExecutionException e) {
+                e.printStackTrace();
+            }
         });
+        executors.shutdown();
+
 
         logger.info("Finished creating attribute Files. Took: " + (System.currentTimeMillis() - sTime) + "ms");
     }
 
-    private void enqueueAttributes() throws IOException {
+    /**
+     * Will use the information of the attributeIndex to create a sorted file for each attribute.
+     * Attributes are being processed in a LPT fashion for greedy optimality
+     *
+     * @throws InterruptedException if the executors are interrupted before completion
+     */
+    private void enqueueAttributes() throws InterruptedException {
 
-        Queue<Attribute> attributeQueue = Arrays.stream(attributeIndex).sorted(Attribute::compareBySize).collect(Collectors.toCollection(ArrayDeque::new));
+        // calculate the available memory based on the parallelization degree
         MemoryUsage memoryUsage = ManagementFactory.getMemoryMXBean().getHeapMemoryUsage();
         long available = memoryUsage.getMax() - memoryUsage.getUsed();
-        // we estimate 400 Bytes per String including overhead
-        long threadStringLimit = available / (config.numThreads*400L);
+        // we estimate 400 Bytes per String including overhead which is a very generous size
+        long threadStringLimit = available / (config.parallel * 400L);
         config.maxMemory = (int) threadStringLimit;
 
-        attributeQueue.parallelStream().forEach(attribute -> {
+        // create the sort jobs, which are ordered decreasingly by the number of total values
+        List<MultiwayMergeSort> sortJobs = Arrays.stream(attributeIndex).sorted(Attribute::compareBySize).map(attribute -> {
             int maxSize = (int) Math.min(attribute.getSize(), config.maxMemory);
-            MultiwayMergeSort multiwayMergeSort = new MultiwayMergeSort(config, attribute, maxSize);
+            return new MultiwayMergeSort(config, attribute, maxSize);
+        }).toList();
+
+        // initialize the executors and process the jobs in parallel
+        ExecutorService executors = Executors.newFixedThreadPool(config.parallel);
+        executors.invokeAll(sortJobs).forEach(sortFuture -> {
             try {
-                multiwayMergeSort.sort();
-            } catch (IOException e) {
+                sortFuture.get();
+            } catch (InterruptedException | ExecutionException e) {
                 e.printStackTrace();
             }
-            attribute.calculateViolations(config);
         });
+        // release the executors
+        executors.shutdown();
+    }
 
-        for (final Attribute attribute : attributeIndex) {
+    /**
+     * This method creates the candidates for the pIND validation. Based on the null handling, the candidates that are generated differ.
+     *
+     * @throws IOException if an attribute file can not be opened
+     */
+    private void initializePINDs() throws IOException {
+        Arrays.stream(attributeIndex).forEach(attribute -> attribute.calculateViolations(config));
+        List<Integer> nonNullIds = Arrays.stream(attributeIndex).filter(attribute -> attribute.getNullCount() == 0).map(Attribute::getId).toList();
+        List<Integer> partialNullIds =
+                Arrays.stream(attributeIndex).filter(attribute -> attribute.getNullCount() > 0 && attribute.getSize() != attribute.getNullCount()).map(Attribute::getId).toList();
+        List<Integer> allNullIds = Arrays.stream(attributeIndex).filter(attribute -> attribute.getNullCount() == attribute.getSize()).map(Attribute::getId).toList();
+        for (Attribute attribute : attributeIndex) {
+
+            // Handle Foreign constraints
+            if (config.nullHandling == Config.NullHandling.FOREIGN) {
+                // initially the attribute references all attributes without nulls
+                attribute.addReferenced(nonNullIds);
+                // if the attribute itself does not contain nulls it is referenced by every other attributes
+                // we can skip the full null attributes, since these will be a subset anyway
+                if (attribute.getNullCount() == 0) {
+                    attribute.setDependent(attributeIndex.length - allNullIds.size());
+                }
+            }
+            // if the attribute is also an all null attribute
+            else if (attribute.getNullCount() == attribute.getSize()) {
+                // if we are in inequality mode the attribute can not reference or be referenced by anything
+
+                if (config.nullHandling == Config.NullHandling.EQUALITY) {
+                    // since all nulls are equal we know these pINDs will hold
+                    attribute.addReferenced(partialNullIds);
+                    attribute.addReferenced(allNullIds);
+                    // we don't need to set the dependant count size the attribute is considered finished after this step
+                } else if (config.nullHandling == Config.NullHandling.SUBSET) {
+                    // in subset null is a subset of everything, even null itself
+                    attribute.addReferenced(nonNullIds);
+                    attribute.addReferenced(partialNullIds);
+                    attribute.addReferenced(allNullIds);
+                }
+            }
+            // the attribute is not all null, and we are not in foreign mode
+            else {
+                attribute.addReferenced(nonNullIds);
+                attribute.addReferenced(partialNullIds);
+                // initially everything depends on everything excluding all null attributes and itself
+                attribute.setDependent(attributeIndex.length - allNullIds.size() - 1);
+            }
+            // open the file and add it to the priority queue if the attribute contains values
             attribute.open();
             if (attribute.getReadPointer().hasNext()) {
                 priorityQueue.add(attribute);
-            } else {
-                // The attribute is null in every entry
-                // Equality will never get here, since null is considered a value
-                if (config.nullHandling == Config.NullHandling.INEQUALITY) {
-                    // Inequality: Every Null is different form every other null
-                    // An attribute that only consists of null can not form any pIND regardless of the threshold.
-                    attribute.getDependent().clear();
-                    attribute.getReferenced().clear();
-                } else {
-                    // Subset: Attribute references everything
-                    // Another Pure-Null attribute could still be a reference
-
-                    // Foreign: Like Subset but referenced can not include null -> handled below
-                    attribute.getDependent().clear();
-                }
             }
         }
 
-
-        // Handle Foreign constraints
-        if (config.nullHandling == Config.NullHandling.FOREIGN) {
-            for (Attribute attribute : attributeIndex) {
-                if (attribute.getNullCount() > 0L) {
-                    for (Attribute depAttribute : attributeIndex) {
-                        depAttribute.removeReferenced(attribute.getId());
-                    }
-                }
-            }
-        }
-    }
-
-    private void initializePINDs() {
-        final IntSet allIds = allIds();
-        for (final Attribute attribute : attributeIndex) {
-            attribute.addDependent(allIds);
-            attribute.removeDependent(attribute.getId());
-            attribute.addReferenced(allIds);
-            attribute.removeReferenced(attribute.getId());
-        }
-    }
-
-    private IntSet allIds() {
-        final IntSet ids = new IntOpenHashSet(attributeIndex.length);
-        for (int index = 0; index < attributeIndex.length; ++index) {
-            ids.add(index);
-        }
-        return ids;
     }
 
     private int getTotalColumnCount(final List<RelationalFileInput> tables) {
         return tables.stream().mapToInt(RelationalFileInput::numberOfColumns).sum();
-    }
-
-    private int compareAttributes(final Attribute a1, final Attribute a2) {
-        if (a1.getCurrentValue() == null && a2.getCurrentValue() == null) {
-            return 0;
-        }
-
-        if (a1.getCurrentValue() == null) {
-            return 1;
-        }
-
-        if (a2.getCurrentValue() == null) {
-            return -1;
-        }
-
-        return a1.getCurrentValue().compareTo(a2.getCurrentValue());
     }
 
     private void calculateInclusionDependencies() {
@@ -207,7 +214,7 @@ public class Spider {
 
             if (topAttributes.size() == 1 && !priorityQueue.isEmpty()) {
                 String nextVal = priorityQueue.peek().getCurrentValue();
-                while (firstAttribute.nextValue() && !firstAttribute.isFinished()) {
+                while (firstAttribute.nextValue() && firstAttribute.isNotFinished()) {
                     if (firstAttribute.getCurrentValue().compareTo(nextVal) >= 0) {
                         priorityQueue.add(firstAttribute);
                         break;
@@ -217,7 +224,7 @@ public class Spider {
 
                 for (int topAttribute : topAttributes.keySet()) {
                     final Attribute attribute = attributeIndex[topAttribute];
-                    if (attribute.nextValue() && !attribute.isFinished()) {
+                    if (attribute.nextValue() && attribute.isNotFinished()) {
                         priorityQueue.add(attribute);
                     }
                 }
@@ -229,34 +236,37 @@ public class Spider {
     }
 
     private void collectResults(long init, long enqueue, long pINDCreation, long pINDValidation) throws IOException {
-        int numUnary = 0;
-        BufferedWriter bw = new BufferedWriter(new FileWriter(".\\results\\" + config.executionName + "_pINDs.txt"));
+        int numUnary = Arrays.stream(attributeIndex).mapToInt(attribute -> attribute.getReferenced().size()).sum();
+        logger.info("Found " + numUnary + " pINDs");
+        BufferedWriter bw;
+        if (config.writeResults) {
+            bw = new BufferedWriter(new FileWriter(".\\results\\" + config.executionName + "_pINDs.txt"));
 
-        for (final Attribute dep : attributeIndex) {
+            for (final Attribute dep : attributeIndex) {
 
-            if (dep.getReferenced().isEmpty()) {
-                continue;
+                if (dep.getReferenced().isEmpty()) {
+                    continue;
+                }
+
+                PINDList.PINDIterator iterator = dep.getReferenced().elementIterator();
+                while (iterator.hasNext()) {
+                    final Attribute ref = attributeIndex[iterator.next().id];
+
+                    bw.write(dep.getTableName() + " " + dep.getColumnName());
+                    bw.write(" < ");
+                    bw.write(ref.getTableName() + " " + ref.getColumnName());
+                    bw.write('\n');
+
+                }
             }
-
-            for (final int refId : dep.getReferenced().keySet()) {
-                numUnary++;
-                final Attribute ref = attributeIndex[refId];
-
-                bw.write(dep.getTableName() + " " + dep.getColumnName());
-                bw.write(" < ");
-                bw.write(ref.getTableName() + " " + ref.getColumnName());
-                bw.write('\n');
-
-            }
+            bw.close();
         }
-        bw.flush();
-        bw.close();
 
-        bw = new BufferedWriter(new FileWriter(".\\results\\" + config.executionName + "_" + (System.currentTimeMillis()/1000) + ".json"));
+        bw = new BufferedWriter(new FileWriter(".\\results\\" + config.executionName + "_" + System.currentTimeMillis() + ".json"));
         // build a json file
         bw.write('{');
         bw.write("\"database\": \"" + config.databaseName + "\",");
-        bw.write("\"threads\": " + config.numThreads + ",");
+        bw.write("\"threads\": " + config.parallel + ",");
         bw.write("\"pINDs\": " + numUnary + ",");
         bw.write("\"threshold\": " + config.threshold + ",");
         bw.write("\"nullHandling\": \"" + config.nullHandling + "\",");
@@ -269,7 +279,6 @@ public class Spider {
         // the total of spilled files + the copied attribute file
         bw.write("\"spilledFiles\": " + (Arrays.stream(attributeIndex).mapToInt(Attribute::getSpilledFiles).sum() + attributeIndex.length));
         bw.write('}');
-        bw.flush();
         bw.close();
     }
 
