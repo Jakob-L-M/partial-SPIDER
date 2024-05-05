@@ -118,7 +118,7 @@ public class Spider {
 
         // create the sort jobs, which are ordered decreasingly by the number of total values
         List<MultiwayMergeSort> sortJobs = Arrays.stream(attributeIndex).sorted(Attribute::compareBySize).map(attribute -> {
-            int maxSize = (int) Math.min(attribute.getSize(), config.maxMemory);
+            int maxSize = Math.max(64, (int) Math.min(attribute.getSize(), config.maxMemory));
             return new MultiwayMergeSort(config, attribute, maxSize);
         }).toList();
 
@@ -220,16 +220,22 @@ public class Spider {
                         break;
                     }
                 }
+                if (firstAttribute.getCurrentValue() == null || !firstAttribute.isNotFinished()) {
+                    logger.debug(firstAttribute.getTableName() + "." + firstAttribute.getColumnName() + " was removed from the queue.");
+                }
             } else {
 
                 for (int topAttribute : topAttributes.keySet()) {
-                    final Attribute attribute = attributeIndex[topAttribute];
+                    Attribute attribute = attributeIndex[topAttribute];
                     if (attribute.nextValue() && attribute.isNotFinished()) {
                         priorityQueue.add(attribute);
+                    } else {
+                        logger.debug(attribute.getTableName() + "." + attribute.getColumnName() + " was removed from the queue.");
                     }
+
+
                 }
             }
-
             topAttributes.clear();
         }
         logger.info("Finished pIND calculation. Took: " + (System.currentTimeMillis() - sTime) + "ms");

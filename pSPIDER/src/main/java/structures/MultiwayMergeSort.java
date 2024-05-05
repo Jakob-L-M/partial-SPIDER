@@ -19,11 +19,11 @@ public class MultiwayMergeSort implements Callable<Void> {
 
     private final Path origin;
     private final int mapLimit;
-    private Map<String, Long> values;
-    private List<Path> spilledFiles;
     private final Logger logger;
     private final Attribute attribute;
     private final int maxMapSize;
+    private Map<String, Long> values;
+    private List<Path> spilledFiles;
     private int valuesSinceLastSpill;
 
     public MultiwayMergeSort(Config config, Attribute attribute, int stringLimit) {
@@ -38,7 +38,7 @@ public class MultiwayMergeSort implements Callable<Void> {
     @Override
     public Void call() throws IOException {
         logger.debug("Starting sort for: " + attribute.getId());
-        this.values = new HashMap<>((int) (mapLimit*1.05));
+        this.values = new HashMap<>(mapLimit / 4);
         this.spilledFiles = new ArrayList<>();
 
         long sTime = System.currentTimeMillis();
@@ -73,7 +73,7 @@ public class MultiwayMergeSort implements Callable<Void> {
 
         String line;
         while ((line = reader.readLine()) != null) {
-            if (1L == this.values.compute(line, (k, v) -> v == null ? 1L : v+1L)) {
+            if (1L == this.values.compute(line, (k, v) -> v == null ? 1L : v + 1L)) {
                 this.maybeWriteSpillFile();
             }
         }
@@ -102,12 +102,16 @@ public class MultiwayMergeSort implements Callable<Void> {
     private void write(Path path) throws IOException {
         BufferedWriter writer = Files.newBufferedWriter(path, StandardOpenOption.CREATE, StandardOpenOption.TRUNCATE_EXISTING);
 
-        for (String key : values.keySet().stream().sorted().toList()) {
-            writer.write(key);
-            writer.newLine();
-            writer.write(values.get(key).toString());
-            writer.newLine();
-        }
+        values.entrySet().stream().sorted(Map.Entry.comparingByKey()).forEach(entry -> {
+            try {
+                writer.write(entry.getKey());
+                writer.newLine();
+                writer.write(entry.getValue().toString());
+                writer.newLine();
+            } catch (IOException e) {
+                e.printStackTrace();
+            }
+        });
         writer.flush();
         writer.close();
     }

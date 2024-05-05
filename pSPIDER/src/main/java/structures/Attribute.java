@@ -117,10 +117,10 @@ public class Attribute implements Comparable<Attribute> {
      * @param attributes     Set of attribute ids, which share some value
      * @param attributeIndex The index that stores all attributes
      */
-    public void intersectReferenced(Set<Integer> attributes, final Attribute[] attributeIndex, Config config) {
-        PINDList.PINDIterator iterator =  referenced.elementIterator();
-        while (iterator.hasNext()) {
-            PINDList.PINDElement current = iterator.next();
+    public void intersectReferenced(Set<Integer> attributes, Attribute[] attributeIndex, Config config) {
+        PINDList.PINDIterator referencedAttributes =  referenced.elementIterator();
+        while (referencedAttributes.hasNext()) {
+            PINDList.PINDElement current = referencedAttributes.next();
             int ref = current.id;
             if (attributes.contains(ref)) {
                 continue;
@@ -135,7 +135,7 @@ public class Attribute implements Comparable<Attribute> {
             }
 
             if (updated_violations < 0L) {
-                iterator.remove();
+                referencedAttributes.remove();
                 attributeIndex[ref].removeDependent();
             }
         }
